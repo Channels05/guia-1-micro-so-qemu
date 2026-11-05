@@ -1,0 +1,11 @@
+
+[kernel] Micro S.O. Fase 3: kernel C freestanding i386 en ejecucion
+[kernel] info Multiboot2 en 0x101850, 1496 bytes
+[kernel] cargador: GRUB 2.06-13+deb12u2
+[kernel] modulo 'imagen' en 0x108000-0x109000 (4096 bytes)
+[kernel] framebuffer: dir 0xFD000000, 800x600, pitch 3200, 32 bpp, tipo 1
+[kernel] mascaras: R pos 16/8 bits, G 8/8, B 0/8
+[kernel] framebuffer validado
+[kernel] patron de prueba dibujado
+[kernel] ERROR imagen: TAMANO DEL MODULO NO COINCIDE CON LA CABECERA
+[kernel] sistema detenido

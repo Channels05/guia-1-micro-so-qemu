@@ -1,0 +1,9 @@
+# Intermedios de la Fase 3 (se regeneran con scripts/build.sh)
+guia-1/fase-3/build/obj/
+guia-1/fase-3/build/iso/
+guia-1/fase-3/build/grub-mkrescue.log
+
+__pycache__/
+.vscode/
+Thumbs.db
+.DS_Store

@@ -1,0 +1,164 @@
+     1                                  ; =============================================================================
+     2                                  ;  boot_f1.asm - Guía 1, Fase 1: sector de arranque BIOS con dibujo ASCII
+     3                                  ;  INFB6074 Infraestructura para Ciencia de Datos - UTEM
+     4                                  ;
+     5                                  ;  El BIOS copia este sector (512 bytes) a la dirección física 0x7C00 y salta
+     6                                  ;  a él en modo real de 16 bits. El programa:
+     7                                  ;    1. inicializa segmentos y pila,
+     8                                  ;    2. pone el modo texto 80x25 (lo que además limpia la pantalla),
+     9                                  ;    3. recorre un flujo de bytes que describe un caballo al galope a color y
+    10                                  ;       lo dibuja con los servicios de video del BIOS (INT 10h),
+    11                                  ;    4. detiene la CPU de forma controlada.
+    12                                  ;
+    13                                  ;  Formato del flujo de bytes del dibujo:
+    14                                  ;    0x00            fin del dibujo
+    15                                  ;    0x0A (NL)       salto de línea: fila + 1, columna = MARGEN
+    16                                  ;    0x01..0x1F      (excepto 0x0A) avanzar N columnas sin escribir
+    17                                  ;    0x80..0xFF      cambiar color: atributo = byte & 0x7F
+    18                                  ;    resto           carácter imprimible, se escribe con el color actual
+    19                                  ;
+    20                                  ;  Ensamblar:  nasm -f bin boot_f1.asm -o build/boot_f1.bin
+    21                                  ; =============================================================================
+    22                                  
+    23                                  bits 16
+    24                                  org 0x7C00                      ; dirección donde el BIOS deja el sector
+    25                                  
+    26                                  MARGEN      equ 20              ; columna izquierda del dibujo (centrado en 80)
+    27                                  FILA_INI    equ 2               ; fila de la primera línea del dibujo
+    28                                  
+    29                                  ; Atributos de color del modo texto (fondo negro, nibble bajo = color de letra)
+    30                                  CAFE        equ 0x06
+    31                                  GRIS        equ 0x07
+    32                                  VERDE       equ 0x0A
+    33                                  AMARILLO    equ 0x0E
+    34                                  BLANCO      equ 0x0F
+    35                                  
+    36                                  %define C(a)  (0x80 | (a))      ; código "cambiar color"
+    37                                  %define NL    10                ; código "salto de línea"
+    38                                  
+    39                                  inicio:
+    40 00000000 FA                          cli                         ; sin interrupciones mientras se arma la pila
+    41 00000001 31C0                        xor ax, ax
+    42 00000003 8ED8                        mov ds, ax                  ; DS = ES = SS = 0 -> direcciones = offsets
+    43 00000005 8EC0                        mov es, ax
+    44 00000007 8ED0                        mov ss, ax
+    45 00000009 BC007C                      mov sp, 0x7C00              ; la pila crece hacia abajo desde el sector
+    46 0000000C FB                          sti
+    47 0000000D FC                          cld                         ; LODSB avanza SI hacia adelante
+    48                                  
+    49 0000000E B80300                      mov ax, 0x0003              ; INT 10h AH=00h: modo texto 80x25, 16 colores
+    50 00000011 CD10                        int 0x10                    ; (cambiar de modo limpia la pantalla)
+    51                                  
+    52 00000013 B401                        mov ah, 0x01                ; INT 10h AH=01h: forma del cursor
+    53 00000015 B90020                      mov cx, 0x2000              ; bit 5 de CH = cursor oculto
+    54 00000018 CD10                        int 0x10
+    55                                  
+    56 0000001A BE[5500]                    mov si, dibujo              ; SI recorre el flujo de bytes
+    57 0000001D BB0700                      mov bx, GRIS                ; BH = página 0, BL = atributo actual
+    58 00000020 BA1402                      mov dx, (FILA_INI << 8) | MARGEN   ; DH = fila, DL = columna
+    59                                  
+    60                                  posicionar:
+    61 00000023 B402                        mov ah, 0x02                ; INT 10h AH=02h: mover cursor a DH:DL
+    62 00000025 CD10                        int 0x10
+    63                                  
+    64                                  siguiente:
+    65 00000027 AC                          lodsb                       ; AL = siguiente byte del dibujo
+    66 00000028 84C0                        test al, al
+    67 0000002A 7425                        jz detener                  ; 0x00 -> fin
+    68 0000002C 781D                        js cambiar_color            ; bit 7 encendido -> color
+    69 0000002E 3C0A                        cmp al, NL
+    70 00000030 7413                        je nueva_linea
+    71 00000032 3C20                        cmp al, 0x20
+    72 00000034 720B                        jb saltar                   ; 0x01..0x1F -> avanzar columnas
+    73                                  
+    74 00000036 B409                        mov ah, 0x09                ; INT 10h AH=09h: escribir carácter + atributo
+    75 00000038 B90100                      mov cx, 1                   ; una repetición, sin mover el cursor
+    76 0000003B CD10                        int 0x10
+    77 0000003D FEC2                        inc dl                      ; la columna avanza a mano
+    78 0000003F EBE2                        jmp posicionar
+    79                                  
+    80                                  saltar:
+    81 00000041 00C2                        add dl, al
+    82 00000043 EBDE                        jmp posicionar
+    83                                  
+    84                                  nueva_linea:
+    85 00000045 FEC6                        inc dh
+    86 00000047 B214                        mov dl, MARGEN
+    87 00000049 EBD8                        jmp posicionar
+    88                                  
+    89                                  cambiar_color:
+    90 0000004B 247F                        and al, 0x7F
+    91 0000004D 88C3                        mov bl, al
+    92 0000004F EBD6                        jmp siguiente
+    93                                  
+    94                                  detener:
+    95 00000051 FA                          cli                         ; nada más que hacer: CPU detenida
+    96                                  .espera:
+    97 00000052 F4                          hlt
+    98 00000053 EBFD                        jmp .espera
+    99                                  
+   100                                  ; -----------------------------------------------------------------------------
+   101                                  ;  Dibujo: caballo al galope sobre el pasto (diseño propio, 14 filas x 39
+   102                                  ;  columnas). Las líneas db se generan desde el texto de abajo con
+   103                                  ;  herramientas/ascii_a_nasm.py: cada racha de espacios es un byte "avanzar".
+   104                                  ;
+   105                                  ;                                    _/;                                  _/~~ ;                                _/~~ o  `-._
+   108                                  ;                              _/~~   ,-.___)
+   109                                  ;                            _/~~    /
+   110                                  ;           ___.------------'~~     |
+   111                                  ;        ,-'                        |
+   112                                  ;      ~(                           /
+   113                                  ;      ~~\   .------------------.  /;       ~ /  /\                 \  \ `-----.
+   115                                  ;        / /  \ \                \  \`-----'
+   116                                  ;       / /    \ \               /  /
+   117                                  ;      /_/      \_\             /__/
+   118                                  ;       ,  .,  ' , .  ,  ., '  ,  . ,  .,  ' ,
+   119                                  ; -----------------------------------------------------------------------------
+   120                                  dibujo:
+   121 00000055 1E8E5F2F5C0A                db 30, C(AMARILLO), "_/\", NL
+   122 0000005B 1C5F2F867E7E208E5C-         db 28, "_/", C(CAFE), "~~ ", C(AMARILLO), "\", NL
+   122 00000064 0A                 
+   123 00000065 1A5F2F867E7E208F6F-         db 26, "_/", C(CAFE), "~~ ", C(BLANCO), "o", 2, C(AMARILLO), "`-._", NL
+   123 0000006E 028E602D2E5F0A     
+   124 00000075 185F2F867E7E038E2C-         db 24, "_/", C(CAFE), "~~", 3, C(AMARILLO), ",-.___)", NL
+   124 0000007E 2D2E5F5F5F290A     
+   125 00000085 165F2F867E7E048E2F-         db 22, "_/", C(CAFE), "~~", 4, C(AMARILLO), "/", NL
+   125 0000008E 0A                 
+   126 0000008F 055F5F5F2E2D2D2D2D-         db 5, "___.------------'", C(CAFE), "~~", 5, C(AMARILLO), "|", NL
+   126 00000098 2D2D2D2D2D2D2D2D27-
+   126 000000A1 867E7E058E7C0A     
+   127 000000A8 022C2D27187C0A              db 2, ",-'", 24, "|", NL
+   128 000000AF 867E8E281B2F0A              db C(CAFE), "~", C(AMARILLO), "(", 27, "/", NL
+   129 000000B6 867E7E8E5C032E2D2D-         db C(CAFE), "~~", C(AMARILLO), "\", 3, ".------------------.", 2, "/\", NL
+   129 000000BF 2D2D2D2D2D2D2D2D2D-
+   129 000000C8 2D2D2D2D2D2D2D2E02-
+   129 000000D1 2F5C0A             
+   130 000000D4 01867E208E2F022F5C-         db 1, C(CAFE), "~ ", C(AMARILLO), "/", 2, "/\", 17, "\", 2, "\ `-----.", NL
+   130 000000DD 115C025C20602D2D2D-
+   130 000000E6 2D2D2E0A           
+   131 000000EA 022F202F025C205C10-         db 2, "/ /", 2, "\ \", 16, "\", 2, "\`-----'", NL
+   131 000000F3 5C025C602D2D2D2D2D-
+   131 000000FC 270A               
+   132 000000FE 012F202F045C205C0F-         db 1, "/ /", 4, "\ \", 15, "/", 2, "/", NL
+   132 00000107 2F022F0A           
+   133 0000010B 2F5F2F065C5F5C0D2F-         db "/_/", 6, "\_\", 13, "/__/", NL
+   133 00000114 5F5F2F0A           
+   134 00000118 018A2C022E2C022720-         db 1, C(VERDE), ",", 2, ".,", 2, "' , .", 2, ",", 2, "., '", 2, ",", 2, ". ,", 2, ".,", 2, "' ,", NL
+   134 00000121 2C202E022C022E2C20-
+   134 0000012A 27022C022E202C022E-
+   134 00000133 2C0227202C0A       
+   135 00000139 0A                          db NL
+   136 0000013A 0B8F4D4943524F2053-         db 11, C(BLANCO), "MICRO S.O. FASE 1", NL
+   136 00000143 2E4F2E204641534520-
+   136 0000014C 310A               
+   137 0000014E 0887417272616E7175-         db 8, C(GRIS), "Arranque BIOS 512 bytes", 0
+   137 00000157 652042494F53203531-
+   137 00000160 3220627974657300   
+   138                                  
+   139                                  ; -----------------------------------------------------------------------------
+   140                                  ;  Relleno hasta el byte 510 y firma de arranque 0x55 0xAA (little endian).
+   141                                  ;  Si el código crece más allá de 510 bytes, NASM falla con "TIMES value is
+   142                                  ;  negative", lo que actúa como comprobación del tamaño en tiempo de ensamblado.
+   143                                  ; -----------------------------------------------------------------------------
+   144 00000168 00<rep 96h>             times 510 - ($ - $$) db 0
+   145 000001FE 55AA                    dw 0xAA55

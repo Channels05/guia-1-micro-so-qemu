@@ -1,0 +1,7 @@
+Construido: 2026-11-05 00:43 UTC
+gcc (Debian 12.2.0-14+deb12u1) 12.2.0
+GNU ld (GNU Binutils for Debian) 2.40
+NASM version 2.16.01
+grub-mkrescue (GRUB) 2.06-13+deb12u2
+xorriso 1.5.4
+Python 3.11.2

@@ -1,0 +1,11 @@
+# Los scripts se ejecutan también dentro de un contenedor Linux: siempre LF
+* text=auto eol=lf
+
+*.bin binary
+*.img binary
+*.iso binary
+*.elf binary
+*.png binary
+*.pdf binary
+*.mp4 binary
+*.pptx binary

@@ -1,0 +1,8 @@
+
+[kernel] Micro S.O. Fase 3: kernel C freestanding i386 en ejecucion
+[kernel] info Multiboot2 en 0x101850, 704 bytes
+[kernel] cargador: GRUB 2.06-13+deb12u2
+[kernel] modulo 'imagen' en 0x108000-0x11DFA0 (90016 bytes)
+[kernel] framebuffer: dir 0xB8000, 80x25, pitch 160, 16 bpp, tipo 2
+[kernel] ERROR framebuffer: EL FRAMEBUFFER NO ES RGB DIRECTO
+[kernel] sistema detenido

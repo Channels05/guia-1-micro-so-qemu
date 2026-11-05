@@ -1,0 +1,704 @@
+     1                                  ; =============================================================================
+     2                                  ;  etapa2_f2.asm - Guía 1, Fase 2: segunda etapa con dibujo ASCII y menú
+     3                                  ;
+     4                                  ;  La carga la etapa 1 en 0000:8000 (ver disposicion.inc). Muestra una barra
+     5                                  ;  que identifica la etapa, el caballo de la Fase 1 y un menú:
+     6                                  ;     [1] Información del sistema    (INT 12h, INT 15h AH=88h, INT 10h AH=0Fh)
+     7                                  ;     [2] Galope del caballo         (animación: redibuja y avanza 2 columnas)
+     8                                  ;     [3] Fecha y hora               (reloj de tiempo real, INT 1Ah)
+     9                                  ;     [0] Detener el sistema         (CLI + HLT)
+    10                                  ;  Cualquier otra tecla muestra un aviso y se vuelve a pedir la opción.
+    11                                  ;
+    12                                  ;  Servicios BIOS usados:
+    13                                  ;     INT 16h AH=00h  esperar tecla (AL = ASCII, AH = código de rastreo)
+    14                                  ;     INT 10h AH=02h  mover cursor        AH=09h  escribir carácter + color
+    15                                  ;     INT 10h AH=06h  limpiar una ventana
+    16                                  ;
+    17                                  ;  Convención de registros en las rutinas de pantalla:
+    18                                  ;     DH:DL = fila:columna del cursor, BL = color actual, BH = página 0
+    19                                  ; =============================================================================
+    20                                  
+    21                                  bits 16
+    22                                  
+    23                                  %include "disposicion.inc"
+     1                              <1> ; =============================================================================
+     2                              <1> ;  disposicion.inc - Mapa de la imagen de disco e interfaz entre etapas
+     3                              <1> ;  (única fuente de verdad: la incluyen ambas etapas y la lee scripts/build.sh)
+     4                              <1> ;
+     5                              <1> ;  Imagen: disquete de 1,44 MB = 2880 sectores de 512 bytes
+     6                              <1> ;          geometría CHS 80 cilindros x 2 cabezas x 18 sectores por pista
+     7                              <1> ;
+     8                              <1> ;    LBA 0          CHS 0/0/1        etapa 1  (boot_f2.bin, 512 B, firma AA55)
+     9                              <1> ;    LBA 1..16      CHS 0/0/2..17    etapa 2  (etapa2_f2.bin, 16 sectores
+    10                              <1> ;                                              = 8 KiB reservados)
+    11                              <1> ;    LBA 17..2879   resto            sin uso (ceros)
+    12                              <1> ;
+    13                              <1> ;  Interfaz etapa 1 -> etapa 2:
+    14                              <1> ;    - la etapa 2 se carga en ETAPA2_SEG:ETAPA2_OFF (0000:8000)
+    15                              <1> ;    - sus 4 primeros bytes son la firma ETAPA2_FIRMA ("ETP2"); la etapa 1 la
+    16                              <1> ;      comprueba antes de saltar y, si no coincide, muestra un error
+    17                              <1> ;    - el punto de entrada es ETAPA2_OFF + 4
+    18                              <1> ;    - estado de la CPU al entrar: modo real 16 bits, CS = DS = ES = SS = 0,
+    19                              <1> ;      SP = 0x7C00, interrupciones habilitadas, DL = unidad de arranque (BIOS)
+    20                              <1> ; =============================================================================
+    21                              <1> 
+    22                              <1> ETAPA2_LBA       equ 1
+    23                              <1> ETAPA2_SECTORES  equ 16
+    24                              <1> ETAPA2_SEG       equ 0x0000
+    25                              <1> ETAPA2_OFF       equ 0x8000
+    26                              <1> ETAPA2_FIRMA     equ 'ETP2'
+    27                              <1> 
+    28                              <1> SECTORES_PISTA   equ 18
+    29                              <1> 
+    30                              <1> ; La etapa 1 lee con una única llamada CHS (cilindro 0, cabeza 0), así que la
+    31                              <1> ; etapa 2 debe caber en la primera pista.
+    32                              <1> %if ETAPA2_LBA + ETAPA2_SECTORES > SECTORES_PISTA
+    33                              <1>     %error "La etapa 2 no cabe en la primera pista del disquete"
+    34                              <1> %endif
+    24                                  %include "video.inc"
+     1                              <1> ; =============================================================================
+     2                              <1> ;  video.inc - Colores del modo texto y códigos del formato de dibujo
+     3                              <1> ;
+     4                              <1> ;  Formato de flujo de bytes (el mismo de la Fase 1):
+     5                              <1> ;    0x00            fin
+     6                              <1> ;    0x0A (NL)       salto de línea: fila + 1, columna = margen inicial
+     7                              <1> ;    0x01..0x1F      (excepto 0x0A) avanzar N columnas sin escribir
+     8                              <1> ;    0x80..0xFF      cambiar color: atributo = byte & 0x7F
+     9                              <1> ;    resto           carácter imprimible
+    10                              <1> ;  Por eso los textos no usan tildes: en UTF-8 serían bytes >= 0x80.
+    11                              <1> ; =============================================================================
+    12                              <1> 
+    13                              <1> CAFE        equ 0x06
+    14                              <1> GRIS        equ 0x07
+    15                              <1> AZUL_CLARO  equ 0x09
+    16                              <1> VERDE       equ 0x0A
+    17                              <1> CIAN        equ 0x0B
+    18                              <1> ROJO        equ 0x04
+    19                              <1> ROJO_CLARO  equ 0x0C
+    20                              <1> AMARILLO    equ 0x0E
+    21                              <1> BLANCO      equ 0x0F
+    22                              <1> BARRA_SUP   equ 0x1F            ; blanco sobre azul
+    23                              <1> BARRA_INF   equ 0x70            ; negro sobre gris
+    24                              <1> 
+    25                              <1> %define C(a)  (0x80 | (a))
+    26                              <1> %define NL    10
+    25                                  
+    26                                  org ETAPA2_OFF
+    27                                  
+    28                                  FILA_MSG    equ 17              ; zona de respuestas: filas 17..23
+    29                                  FILA_VOLVER equ 23
+    30                                  COL_MSG     equ 4
+    31                                  FILA_GALOPE equ 5               ; fila superior del caballo en la animación
+    32                                  
+    33                                  ; ESCRIBIR fila, columna, etiqueta: dibuja un flujo de bytes en esa posición
+    34                                  %macro ESCRIBIR 3
+    35                                      mov dx, ((%1) << 8) | (%2)
+    36                                      mov si, %3
+    37                                      call dibujar
+    38                                  %endmacro
+    39                                  
+    40                                  ; -----------------------------------------------------------------------------
+    41                                  cabecera:
+    42 00000000 45545032                    dd ETAPA2_FIRMA             ; la etapa 1 verifica estos 4 bytes
+    43                                  
+    44                                  entrada:                        ; ETAPA2_OFF + 4
+    45 00000004 31C0                        xor ax, ax
+    46 00000006 8ED8                        mov ds, ax
+    47 00000008 8EC0                        mov es, ax
+    48 0000000A FC                          cld
+    49 0000000B 8816[A107]                  mov [unidad], dl            ; interfaz: DL = unidad de arranque
+    50 0000000F 31DB                        xor bx, bx                  ; BH = página 0 en todas las llamadas
+    51                                  
+    52                                  menu:
+    53 00000011 E8CC01                      call pantalla_principal
+    54                                  
+    55                                  leer_tecla:
+    56 00000014 8B16[A607]                  mov dx, [pos_prompt]
+    57 00000018 E83C02                      call cursor
+    58 0000001B 30E4                        xor ah, ah                  ; INT 16h AH=00h: esperar una tecla
+    59 0000001D CD16                        int 0x16
+    60 0000001F 3C31                        cmp al, '1'
+    61 00000021 7457                        je opcion_info
+    62 00000023 3C32                        cmp al, '2'
+    63 00000025 0F84C100                    je opcion_galope
+    64 00000029 3C33                        cmp al, '3'
+    65 0000002B 0F842001                    je opcion_reloj
+    66 0000002F 3C30                        cmp al, '0'
+    67 00000031 0F849401                    je opcion_detener
+    68                                  
+    69                                  ; --- entrada no válida: avisar y volver a leer sin redibujar ---------------
+    70 00000035 A3[A407]                    mov [tecla], ax
+    71 00000038 E8C502                      call limpiar_respuesta
+    72                                      ESCRIBIR FILA_MSG, COL_MSG, txt_invalida
+    35 0000003B BA0411              <1>  mov dx, ((%1) << 8) | (%2)
+    36 0000003E BE[4205]            <1>  mov si, %3
+    37 00000041 E83302              <1>  call dibujar
+    73 00000044 A1[A407]                    mov ax, [tecla]
+    74 00000047 3C20                        cmp al, ' '                 ; ¿carácter imprimible?
+    75 00000049 7213                        jb .sin_ascii
+    76 0000004B 3C7E                        cmp al, '~'
+    77 0000004D 770F                        ja .sin_ascii
+    78 0000004F 50                          push ax
+    79 00000050 B027                        mov al, "'"
+    80 00000052 E80E02                      call poner_car
+    81 00000055 58                          pop ax
+    82 00000056 E80A02                      call poner_car
+    83 00000059 B027                        mov al, "'"
+    84 0000005B E80502                      call poner_car
+    85                                  .sin_ascii:
+    86 0000005E BE[5605]                    mov si, txt_scan
+    87 00000061 E81302                      call dibujar
+    88 00000064 A0[A507]                    mov al, [tecla + 1]         ; AH = código de rastreo
+    89 00000067 E84802                      call hex8
+    90 0000006A B029                        mov al, ')'
+    91 0000006C E8F401                      call poner_car
+    92                                      ESCRIBIR FILA_MSG + 1, COL_MSG, txt_reintento
+    35 0000006F BA0412              <1>  mov dx, ((%1) << 8) | (%2)
+    36 00000072 BE[6C05]            <1>  mov si, %3
+    37 00000075 E8FF01              <1>  call dibujar
+    93 00000078 EB9A                        jmp leer_tecla
+    94                                  
+    95                                  ; --- [1] información del sistema -------------------------------------------
+    96                                  opcion_info:
+    97 0000007A E88302                      call limpiar_respuesta
+    98                                      ESCRIBIR FILA_MSG, COL_MSG, txt_info_titulo
+    35 0000007D BA0411              <1>  mov dx, ((%1) << 8) | (%2)
+    36 00000080 BE[9205]            <1>  mov si, %3
+    37 00000083 E8F101              <1>  call dibujar
+    99                                      ESCRIBIR FILA_MSG + 1, COL_MSG, txt_mem_conv
+    35 00000086 BA0412              <1>  mov dx, ((%1) << 8) | (%2)
+    36 00000089 BE[AB05]            <1>  mov si, %3
+    37 0000008C E8E801              <1>  call dibujar
+   100 0000008F CD12                        int 0x12                    ; AX = KB de memoria convencional
+   101 00000091 E83802                      call dec16
+   102 00000094 BE[6B06]                    mov si, txt_kb
+   103 00000097 E8DD01                      call dibujar
+   104                                      ESCRIBIR FILA_MSG + 2, COL_MSG, txt_mem_ext
+    35 0000009A BA0413              <1>  mov dx, ((%1) << 8) | (%2)
+    36 0000009D BE[D705]            <1>  mov si, %3
+    37 000000A0 E8D401              <1>  call dibujar
+   105 000000A3 B488                        mov ah, 0x88                ; AX = KB sobre 1 MB (máximo informado: 64 MB)
+   106 000000A5 CD15                        int 0x15
+   107 000000A7 E82202                      call dec16
+   108 000000AA BE[6B06]                    mov si, txt_kb
+   109 000000AD E8C701                      call dibujar
+   110                                      ESCRIBIR FILA_MSG + 3, COL_MSG, txt_video
+    35 000000B0 BA0414              <1>  mov dx, ((%1) << 8) | (%2)
+    36 000000B3 BE[0306]            <1>  mov si, %3
+    37 000000B6 E8BE01              <1>  call dibujar
+   111 000000B9 B40F                        mov ah, 0x0F                ; AL = modo de video, AH = columnas
+   112 000000BB CD10                        int 0x10
+   113 000000BD 50                          push ax
+   114 000000BE E8F101                      call hex8
+   115 000000C1 BE[3106]                    mov si, txt_columnas
+   116 000000C4 E8B001                      call dibujar
+   117 000000C7 58                          pop ax
+   118 000000C8 88E0                        mov al, ah
+   119 000000CA 30E4                        xor ah, ah
+   120 000000CC E8FD01                      call dec16
+   121                                      ESCRIBIR FILA_MSG + 4, COL_MSG, txt_etapa2
+    35 000000CF BA0415              <1>  mov dx, ((%1) << 8) | (%2)
+    36 000000D2 BE[4006]            <1>  mov si, %3
+    37 000000D5 E89F01              <1>  call dibujar
+   122 000000D8 B8B007                      mov ax, ETAPA2_USADOS
+   123 000000DB E8EE01                      call dec16
+   124 000000DE BE[7006]                    mov si, txt_bytes
+   125 000000E1 E89301                      call dibujar
+   126 000000E4 E86201                      call volver_al_menu
+   127 000000E7 E927FF                      jmp menu
+   128                                  
+   129                                  ; --- [2] galope del caballo -----------------------------------------------
+   130                                  opcion_galope:
+   131 000000EA E80A02                      call limpiar_pantalla
+   132                                      ESCRIBIR FILA_GALOPE, 0, caballo
+    35 000000ED BA0005              <1>  mov dx, ((%1) << 8) | (%2)
+    36 000000F0 BE[2303]            <1>  mov si, %3
+    37 000000F3 E88101              <1>  call dibujar
+   133                                      ESCRIBIR 24, 27, txt_cuenta
+    35 000000F6 BA1B18              <1>  mov dx, ((%1) << 8) | (%2)
+    36 000000F9 BE[7F06]            <1>  mov si, %3
+    37 000000FC E87801              <1>  call dibujar
+   134 000000FF B033                        mov al, '3'
+   135                                  .cuenta:
+   136 00000101 E85F01                      call poner_car
+   137 00000104 50                          push ax
+   138 00000105 B020                        mov al, ' '
+   139 00000107 E85901                      call poner_car
+   140 0000010A B91200                      mov cx, 18                  ; ~1 segundo
+   141 0000010D E80402                      call esperar_ticks
+   142 00000110 58                          pop ax
+   143 00000111 FEC8                        dec al
+   144 00000113 3C30                        cmp al, '0'
+   145 00000115 75EA                        jne .cuenta
+   146                                  
+   147 00000117 C606[A307]00                mov byte [col_galope], 0
+   148                                  .galope:
+   149 0000011C E8CE01                      call limpiar_galope         ; borrar la posición anterior
+   150 0000011F B605                        mov dh, FILA_GALOPE
+   151 00000121 8A16[A307]                  mov dl, [col_galope]
+   152 00000125 BE[2303]                    mov si, caballo
+   153 00000128 E84C01                      call dibujar                ; lo que pasa de la columna 79 no se escribe
+   154 0000012B B90200                      mov cx, 2                   ; dos ticks (~110 ms) por cuadro
+   155 0000012E E8E301                      call esperar_ticks
+   156 00000131 8006[A307]02                add byte [col_galope], 2
+   157 00000136 803E[A307]50                cmp byte [col_galope], 80
+   158 0000013B 72DF                        jb .galope
+   159 0000013D E8B701                      call limpiar_pantalla
+   160                                  
+   161                                      ESCRIBIR 11, 15, txt_exito
+    35 00000140 BA0F0B              <1>  mov dx, ((%1) << 8) | (%2)
+    36 00000143 BE[8D06]            <1>  mov si, %3
+    37 00000146 E82E01              <1>  call dibujar
+   162 00000149 E8FD00                      call volver_al_menu
+   163 0000014C E9C2FE                      jmp menu
+   164                                  
+   165                                  ; --- [3] fecha y hora del reloj de tiempo real -----------------------------
+   166                                  opcion_reloj:
+   167 0000014F E8AE01                      call limpiar_respuesta
+   168 00000152 B404                        mov ah, 0x04                ; INT 1Ah AH=04h: CH siglo, CL año, DH mes, DL día
+   169 00000154 CD1A                        int 0x1A
+   170 00000156 890E[A807]                  mov [rtc_fecha], cx
+   171 0000015A 8916[AA07]                  mov [rtc_fecha + 2], dx
+   172 0000015E B402                        mov ah, 0x02                ; INT 1Ah AH=02h: CH hora, CL min, DH seg
+   173 00000160 CD1A                        int 0x1A
+   174 00000162 890E[AC07]                  mov [rtc_hora], cx
+   175 00000166 8916[AE07]                  mov [rtc_hora + 2], dx
+   176                                  
+   177                                      ESCRIBIR FILA_MSG, COL_MSG, txt_fecha   ; los valores vienen en BCD:
+    35 0000016A BA0411              <1>  mov dx, ((%1) << 8) | (%2)
+    36 0000016D BE[BC06]            <1>  mov si, %3
+    37 00000170 E80401              <1>  call dibujar
+   178 00000173 A0[A907]                    mov al, [rtc_fecha + 1]                 ; en hexadecimal se leen tal cual
+   179 00000176 E83901                      call hex8
+   180 00000179 A0[A807]                    mov al, [rtc_fecha]
+   181 0000017C E83301                      call hex8
+   182 0000017F B02D                        mov al, '-'
+   183 00000181 E8DF00                      call poner_car
+   184 00000184 A0[AB07]                    mov al, [rtc_fecha + 3]
+   185 00000187 E82801                      call hex8
+   186 0000018A B02D                        mov al, '-'
+   187 0000018C E8D400                      call poner_car
+   188 0000018F A0[AA07]                    mov al, [rtc_fecha + 2]
+   189 00000192 E81D01                      call hex8
+   190                                  
+   191                                      ESCRIBIR FILA_MSG + 1, COL_MSG, txt_hora
+    35 00000195 BA0412              <1>  mov dx, ((%1) << 8) | (%2)
+    36 00000198 BE[DA06]            <1>  mov si, %3
+    37 0000019B E8D900              <1>  call dibujar
+   192 0000019E A0[AD07]                    mov al, [rtc_hora + 1]
+   193 000001A1 E80E01                      call hex8
+   194 000001A4 B03A                        mov al, ':'
+   195 000001A6 E8BA00                      call poner_car
+   196 000001A9 A0[AC07]                    mov al, [rtc_hora]
+   197 000001AC E80301                      call hex8
+   198 000001AF B03A                        mov al, ':'
+   199 000001B1 E8AF00                      call poner_car
+   200 000001B4 A0[AF07]                    mov al, [rtc_hora + 3]
+   201 000001B7 E8F800                      call hex8
+   202                                      ESCRIBIR FILA_MSG + 2, COL_MSG, txt_rtc_nota
+    35 000001BA BA0413              <1>  mov dx, ((%1) << 8) | (%2)
+    36 000001BD BE[F806]            <1>  mov si, %3
+    37 000001C0 E8B400              <1>  call dibujar
+   203 000001C3 E88300                      call volver_al_menu
+   204 000001C6 E948FE                      jmp menu
+   205                                  
+   206                                  ; --- [0] detener el sistema ------------------------------------------------
+   207                                  opcion_detener:
+   208 000001C9 E82B01                      call limpiar_pantalla
+   209                                      ESCRIBIR 11, 14, txt_detenido
+    35 000001CC BA0E0B              <1>  mov dx, ((%1) << 8) | (%2)
+    36 000001CF BE[6207]            <1>  mov si, %3
+    37 000001D2 E8A200              <1>  call dibujar
+   210 000001D5 B401                        mov ah, 0x01                ; ocultar el cursor
+   211 000001D7 B90020                      mov cx, 0x2000
+   212 000001DA CD10                        int 0x10
+   213 000001DC FA                          cli
+   214                                  .espera:
+   215 000001DD F4                          hlt
+   216 000001DE EBFD                        jmp .espera
+   217                                  
+   218                                  ; =============================================================================
+   219                                  ;  Pantallas
+   220                                  ; =============================================================================
+   221                                  pantalla_principal:
+   222 000001E0 E81401                      call limpiar_pantalla
+   223 000001E3 BA0000                      mov dx, 0x0000              ; barra superior: fila 0 completa en azul
+   224 000001E6 B31F                        mov bl, BARRA_SUP
+   225 000001E8 E86C00                      call cursor
+   226 000001EB B82009                      mov ax, 0x0920
+   227 000001EE B95000                      mov cx, 80
+   228 000001F1 CD10                        int 0x10
+   229                                      ESCRIBIR 0, 2, txt_titulo
+    35 000001F3 BA0200              <1>  mov dx, ((%1) << 8) | (%2)
+    36 000001F6 BE[0804]            <1>  mov si, %3
+    37 000001F9 E87B00              <1>  call dibujar
+   230 000001FC B80000                      mov ax, ETAPA2_SEG
+   231 000001FF E8A900                      call hex16
+   232 00000202 B03A                        mov al, ':'
+   233 00000204 E85C00                      call poner_car
+   234 00000207 B80080                      mov ax, ETAPA2_OFF
+   235 0000020A E89E00                      call hex16
+   236 0000020D BE[3004]                    mov si, txt_unidad
+   237 00000210 E86400                      call dibujar
+   238 00000213 A0[A107]                    mov al, [unidad]
+   239 00000216 E89900                      call hex8
+   240                                  
+   241 00000219 BA0018                      mov dx, 0x1800              ; barra inferior: fila 24
+   242 0000021C B370                        mov bl, BARRA_INF
+   243 0000021E E83600                      call cursor
+   244 00000221 B82009                      mov ax, 0x0920
+   245 00000224 B95000                      mov cx, 80
+   246 00000227 CD10                        int 0x10
+   247                                      ESCRIBIR 24, 2, txt_pie
+    35 00000229 BA0218              <1>  mov dx, ((%1) << 8) | (%2)
+    36 0000022C BE[4B04]            <1>  mov si, %3
+    37 0000022F E84500              <1>  call dibujar
+   248                                  
+   249                                      ESCRIBIR 2, 2, caballo
+    35 00000232 BA0202              <1>  mov dx, ((%1) << 8) | (%2)
+    36 00000235 BE[2303]            <1>  mov si, %3
+    37 00000238 E83C00              <1>  call dibujar
+   250                                      ESCRIBIR 3, 44, txt_menu
+    35 0000023B BA2C03              <1>  mov dx, ((%1) << 8) | (%2)
+    36 0000023E BE[9004]            <1>  mov si, %3
+    37 00000241 E83300              <1>  call dibujar
+   251 00000244 8916[A607]                  mov [pos_prompt], dx        ; aquí queda el cursor esperando la opción
+   252 00000248 C3                          ret
+   253                                  
+   254                                  volver_al_menu:
+   255                                      ESCRIBIR FILA_VOLVER, COL_MSG, txt_volver
+    35 00000249 BA0417              <1>  mov dx, ((%1) << 8) | (%2)
+    36 0000024C BE[3107]            <1>  mov si, %3
+    37 0000024F E82500              <1>  call dibujar
+   256 00000252 30E4                        xor ah, ah
+   257 00000254 CD16                        int 0x16
+   258 00000256 C3                          ret
+   259                                  
+   260                                  ; =============================================================================
+   261                                  ;  Rutinas de pantalla
+   262                                  ; =============================================================================
+   263                                  
+   264                                  ; cursor: mueve el cursor a DH:DL (INT 10h AH=02h); fuera de pantalla no hace nada
+   265                                  cursor:
+   266 00000257 80FA50                      cmp dl, 80
+   267 0000025A 7306                        jae .fuera
+   268 0000025C 50                          push ax
+   269 0000025D B402                        mov ah, 0x02
+   270 0000025F CD10                        int 0x10
+   271 00000261 58                          pop ax
+   272                                  .fuera:
+   273 00000262 C3                          ret
+   274                                  
+   275                                  ; poner_car: escribe AL con el color BL en DH:DL y avanza una columna.
+   276                                  ; Si la columna pasa de 79 no escribe (recorte para la animación).
+   277                                  poner_car:
+   278 00000263 80FA50                      cmp dl, 80
+   279 00000266 730B                        jae .recortar
+   280 00000268 50                          push ax
+   281 00000269 51                          push cx
+   282 0000026A B409                        mov ah, 0x09
+   283 0000026C B90100                      mov cx, 1
+   284 0000026F CD10                        int 0x10
+   285 00000271 59                          pop cx
+   286 00000272 58                          pop ax
+   287                                  .recortar:
+   288 00000273 FEC2                        inc dl
+   289 00000275 EBE0                        jmp cursor
+   290                                  
+   291                                  ; dibujar: interpreta el flujo DS:SI desde DH:DL (DL inicial = margen)
+   292                                  dibujar:
+   293 00000277 8816[A207]                  mov [margen], dl
+   294 0000027B E8D9FF                      call cursor
+   295                                  .siguiente:
+   296 0000027E AC                          lodsb
+   297 0000027F 84C0                        test al, al
+   298 00000281 7427                        jz .fin
+   299 00000283 781F                        js .color
+   300 00000285 3C0A                        cmp al, NL
+   301 00000287 7410                        je .nueva_linea
+   302 00000289 3C20                        cmp al, ' '
+   303 0000028B 7205                        jb .saltar
+   304 0000028D E8D3FF                      call poner_car
+   305 00000290 EBEC                        jmp .siguiente
+   306                                  .saltar:
+   307 00000292 00C2                        add dl, al
+   308 00000294 E8C0FF                      call cursor
+   309 00000297 EBE5                        jmp .siguiente
+   310                                  .nueva_linea:
+   311 00000299 FEC6                        inc dh
+   312 0000029B 8A16[A207]                  mov dl, [margen]
+   313 0000029F E8B5FF                      call cursor
+   314 000002A2 EBDA                        jmp .siguiente
+   315                                  .color:
+   316 000002A4 247F                        and al, 0x7F
+   317 000002A6 88C3                        mov bl, al
+   318 000002A8 EBD4                        jmp .siguiente
+   319                                  .fin:
+   320 000002AA C3                          ret
+   321                                  
+   322                                  ; hex16 / hex8: escriben AX / AL en hexadecimal
+   323                                  hex16:
+   324 000002AB 50                          push ax
+   325 000002AC 88E0                        mov al, ah
+   326 000002AE E80100                      call hex8
+   327 000002B1 58                          pop ax
+   328                                  hex8:
+   329 000002B2 50                          push ax
+   330 000002B3 C0E804                      shr al, 4
+   331 000002B6 E80900                      call .digito
+   332 000002B9 58                          pop ax
+   333 000002BA 50                          push ax
+   334 000002BB 240F                        and al, 0x0F
+   335 000002BD E80200                      call .digito
+   336 000002C0 58                          pop ax
+   337 000002C1 C3                          ret
+   338                                  .digito:
+   339 000002C2 0430                        add al, '0'
+   340 000002C4 3C39                        cmp al, '9'
+   341 000002C6 7602                        jbe .poner
+   342 000002C8 0407                        add al, 7
+   343                                  .poner:
+   344 000002CA EB97                        jmp poner_car
+   345                                  
+   346                                  ; dec16: escribe AX en decimal
+   347                                  dec16:
+   348 000002CC 50                          push ax
+   349 000002CD 51                          push cx
+   350 000002CE 56                          push si
+   351 000002CF 89D6                        mov si, dx                  ; DX se usa en la división: guardar el cursor
+   352 000002D1 31C9                        xor cx, cx
+   353                                  .dividir:
+   354 000002D3 31D2                        xor dx, dx
+   355 000002D5 F736[9F07]                  div word [diez]
+   356 000002D9 52                          push dx                     ; resto = dígito
+   357 000002DA 41                          inc cx
+   358 000002DB 85C0                        test ax, ax
+   359 000002DD 75F4                        jnz .dividir
+   360 000002DF 89F2                        mov dx, si
+   361                                  .escribir:
+   362 000002E1 58                          pop ax
+   363 000002E2 0430                        add al, '0'
+   364 000002E4 E87CFF                      call poner_car
+   365 000002E7 E2F8                        loop .escribir
+   366 000002E9 5E                          pop si
+   367 000002EA 59                          pop cx
+   368 000002EB 58                          pop ax
+   369 000002EC C3                          ret
+   370                                  
+   371                                  limpiar_galope:                 ; filas que ocupa el caballo en la animación
+   372 000002ED 51                          push cx
+   373 000002EE 52                          push dx
+   374 000002EF B90005                      mov cx, (FILA_GALOPE << 8) | 0
+   375 000002F2 BA4F12                      mov dx, ((FILA_GALOPE + 13) << 8) | 79
+   376 000002F5 EB11                        jmp limpiar
+   377                                  limpiar_pantalla:
+   378 000002F7 51                          push cx
+   379 000002F8 52                          push dx
+   380 000002F9 31C9                        xor cx, cx
+   381 000002FB BA4F18                      mov dx, 0x184F
+   382 000002FE EB08                        jmp limpiar
+   383                                  limpiar_respuesta:
+   384 00000300 51                          push cx
+   385 00000301 52                          push dx
+   386 00000302 B90011                      mov cx, (FILA_MSG << 8) | 0
+   387 00000305 BA4F17                      mov dx, (FILA_VOLVER << 8) | 79
+   388                                  limpiar:                        ; borra la ventana CH:CL - DH:DL
+   389 00000308 53                          push bx
+   390 00000309 B80006                      mov ax, 0x0600
+   391 0000030C B707                        mov bh, GRIS
+   392 0000030E CD10                        int 0x10
+   393 00000310 5B                          pop bx
+   394 00000311 5A                          pop dx
+   395 00000312 59                          pop cx
+   396 00000313 C3                          ret
+   397                                  
+   398                                  ; esperar_ticks: espera CX ticks del temporizador del BIOS (~55 ms cada uno)
+   399                                  esperar_ticks:
+   400 00000314 50                          push ax
+   401                                  .tick:
+   402 00000315 A16C04                      mov ax, [0x046C]
+   403                                  .mismo:
+   404 00000318 F4                          hlt                         ; dormir hasta la próxima interrupción
+   405 00000319 3B066C04                    cmp ax, [0x046C]
+   406 0000031D 74F9                        je .mismo
+   407 0000031F E2F4                        loop .tick
+   408 00000321 58                          pop ax
+   409 00000322 C3                          ret
+   410                                  
+   411                                  ; =============================================================================
+   412                                  ;  Datos
+   413                                  ; =============================================================================
+   414                                  %include "dibujo.inc"
+     1                              <1> ; =============================================================================
+     2                              <1> ;  dibujo.inc - Caballo de la Fase 1 (mismo diseño), en formato de flujo
+     3                              <1> ;  14 filas x 39 columnas; las columnas son relativas al margen.
+     4                              <1> ;  Generado desde herramientas/ascii_a_nasm.py (el texto del dibujo está ahí).
+     5                              <1> ; =============================================================================
+     6                              <1> caballo:
+     7 00000323 1E8E5F2F5C0A        <1>     db 30, C(AMARILLO), "_/\", NL
+     8 00000329 1C5F2F867E7E208E5C- <1>     db 28, "_/", C(CAFE), "~~ ", C(AMARILLO), "\", NL
+     8 00000332 0A                  <1>
+     9 00000333 1A5F2F867E7E208F6F- <1>     db 26, "_/", C(CAFE), "~~ ", C(BLANCO), "o", 2, C(AMARILLO), "`-._", NL
+     9 0000033C 028E602D2E5F0A      <1>
+    10 00000343 185F2F867E7E038E2C- <1>     db 24, "_/", C(CAFE), "~~", 3, C(AMARILLO), ",-.___)", NL
+    10 0000034C 2D2E5F5F5F290A      <1>
+    11 00000353 165F2F867E7E048E2F- <1>     db 22, "_/", C(CAFE), "~~", 4, C(AMARILLO), "/", NL
+    11 0000035C 0A                  <1>
+    12 0000035D 055F5F5F2E2D2D2D2D- <1>     db 5, "___.------------'", C(CAFE), "~~", 5, C(AMARILLO), "|", NL
+    12 00000366 2D2D2D2D2D2D2D2D27- <1>
+    12 0000036F 867E7E058E7C0A      <1>
+    13 00000376 022C2D27187C0A      <1>     db 2, ",-'", 24, "|", NL
+    14 0000037D 867E8E281B2F0A      <1>     db C(CAFE), "~", C(AMARILLO), "(", 27, "/", NL
+    15 00000384 867E7E8E5C032E2D2D- <1>     db C(CAFE), "~~", C(AMARILLO), "\", 3, ".------------------.", 2, "/\", NL
+    15 0000038D 2D2D2D2D2D2D2D2D2D- <1>
+    15 00000396 2D2D2D2D2D2D2D2E02- <1>
+    15 0000039F 2F5C0A              <1>
+    16 000003A2 01867E208E2F022F5C- <1>     db 1, C(CAFE), "~ ", C(AMARILLO), "/", 2, "/\", 17, "\", 2, "\ `-----.", NL
+    16 000003AB 115C025C20602D2D2D- <1>
+    16 000003B4 2D2D2E0A            <1>
+    17 000003B8 022F202F025C205C10- <1>     db 2, "/ /", 2, "\ \", 16, "\", 2, "\`-----'", NL
+    17 000003C1 5C025C602D2D2D2D2D- <1>
+    17 000003CA 270A                <1>
+    18 000003CC 012F202F045C205C0F- <1>     db 1, "/ /", 4, "\ \", 15, "/", 2, "/", NL
+    18 000003D5 2F022F0A            <1>
+    19 000003D9 2F5F2F065C5F5C0D2F- <1>     db "/_/", 6, "\_\", 13, "/__/", NL
+    19 000003E2 5F5F2F0A            <1>
+    20 000003E6 018A2C022E2C022720- <1>     db 1, C(VERDE), ",", 2, ".,", 2, "' , .", 2, ",", 2, "., '", 2, ",", 2, ". ,", 2, ".,", 2, "' ,", C(GRIS), 0
+    20 000003EF 2C202E022C022E2C20- <1>
+    20 000003F8 27022C022E202C022E- <1>
+    20 00000401 2C0227202C8700      <1>
+   415                                  
+   416 00000408 9F4D4943524F20532E-     txt_titulo      db C(BARRA_SUP), "MICRO S.O.  |  ETAPA 2  |  cargada en ", 0
+   416 00000411 4F2E20207C20204554-
+   416 0000041A 415041203220207C20-
+   416 00000423 206361726761646120-
+   416 0000042C 656E2000           
+   417 00000430 206465736465204C42-     txt_unidad      db " desde LBA 1  |  unidad 0x", 0
+   417 00000439 41203120207C202075-
+   417 00000442 6E6964616420307800 
+   418 0000044B F05465636C61646F3A-     txt_pie         db C(BARRA_INF), "Teclado: INT 16h  |  Video: INT 10h  |  Disco: INT 13h AH=02h (CHS)", 0
+   418 00000454 20494E542031366820-
+   418 0000045D 207C2020566964656F-
+   418 00000466 3A20494E5420313068-
+   418 0000046F 20207C202044697363-
+   418 00000478 6F3A20494E54203133-
+   418 00000481 682041483D30326820-
+   418 0000048A 284348532900       
+   419                                  
+   420 00000490 8E4D454E5520505249-     txt_menu        db C(AMARILLO), "MENU PRINCIPAL", NL
+   420 00000499 4E434950414C0A     
+   421 000004A0 872D2D2D2D2D2D2D2D-                     db C(GRIS), "----------------------------", NL, NL
+   421 000004A9 2D2D2D2D2D2D2D2D2D-
+   421 000004B2 2D2D2D2D2D2D2D2D2D-
+   421 000004BB 2D2D0A0A           
+   422 000004BF 8B5B315D208F496E66-                     db C(CIAN), "[1] ", C(BLANCO), "Informacion del sistema", NL
+   422 000004C8 6F726D6163696F6E20-
+   422 000004D1 64656C207369737465-
+   422 000004DA 6D610A             
+   423 000004DD 8B5B325D208F47616C-                     db C(CIAN), "[2] ", C(BLANCO), "Galope del caballo", NL
+   423 000004E6 6F70652064656C2063-
+   423 000004EF 6162616C6C6F0A     
+   424 000004F6 8B5B335D208F466563-                     db C(CIAN), "[3] ", C(BLANCO), "Fecha y hora (RTC)", NL
+   424 000004FF 6861207920686F7261-
+   424 00000508 2028525443290A     
+   425 0000050F 8B5B305D208F446574-                     db C(CIAN), "[0] ", C(BLANCO), "Detener el sistema", NL, NL
+   425 00000518 656E657220656C2073-
+   425 00000521 697374656D610A0A   
+   426 00000529 8753656C656363696F-                     db C(GRIS), "Seleccione una opcion: ", 0
+   426 00000532 6E6520756E61206F70-
+   426 0000053B 63696F6E3A2000     
+   427                                  
+   428 00000542 8C4F7063696F6E206E-     txt_invalida    db C(ROJO_CLARO), "Opcion no valida: ", 0
+   428 0000054B 6F2076616C6964613A-
+   428 00000554 2000               
+   429 00000556 8C2028636F6469676F-     txt_scan        db C(ROJO_CLARO), " (codigo de tecla 0x", 0
+   429 0000055F 206465207465636C61-
+   429 00000568 20307800           
+   430 0000056C 8755736520312C2032-     txt_reintento   db C(GRIS), "Use 1, 2, 3 o 0. Intente nuevamente.", 0
+   430 00000575 2C2033206F20302E20-
+   430 0000057E 496E74656E7465206E-
+   430 00000587 756576616D656E7465-
+   430 00000590 2E00               
+   431                                  
+   432 00000592 8E496E666F726D6163-     txt_info_titulo db C(AMARILLO), "Informacion del sistema", 0
+   432 0000059B 696F6E2064656C2073-
+   432 000005A4 697374656D6100     
+   433 000005AB 874D656D6F72696120-     txt_mem_conv    db C(GRIS), "Memoria convencional (INT 12h) ......... ", C(BLANCO), 0
+   433 000005B4 636F6E76656E63696F-
+   433 000005BD 6E616C2028494E5420-
+   433 000005C6 31326829202E2E2E2E-
+   433 000005CF 2E2E2E2E2E208F00   
+   434 000005D7 874D656D6F72696120-     txt_mem_ext     db C(GRIS), "Memoria extendida (INT 15h AH=88h) ..... ", C(BLANCO), 0
+   434 000005E0 657874656E64696461-
+   434 000005E9 2028494E5420313568-
+   434 000005F2 2041483D3838682920-
+   434 000005FB 2E2E2E2E2E208F00   
+   435 00000603 874D6F646F20646520-     txt_video       db C(GRIS), "Modo de video (INT 10h AH=0Fh) ......... ", C(BLANCO), "0x", 0
+   435 0000060C 766964656F2028494E-
+   435 00000615 54203130682041483D-
+   435 0000061E 30466829202E2E2E2E-
+   435 00000627 2E2E2E2E2E208F3078-
+   435 00000630 00                 
+   436 00000631 872C20636F6C756D6E-     txt_columnas    db C(GRIS), ", columnas: ", C(BLANCO), 0
+   436 0000063A 61733A208F00       
+   437 00000640 87457461706120323A-     txt_etapa2      db C(GRIS), "Etapa 2: LBA 1, 16 sectores reservados, ", C(BLANCO), 0
+   437 00000649 204C424120312C2031-
+   437 00000652 3620736563746F7265-
+   437 0000065B 732072657365727661-
+   437 00000664 646F732C208F00     
+   438 0000066B 87204B4200              txt_kb          db C(GRIS), " KB", 0
+   439 00000670 872062797465732075-     txt_bytes       db C(GRIS), " bytes usados", 0
+   439 00000679 7361646F7300       
+   440                                  
+   441 0000067F 8E5061727469646120-     txt_cuenta      db C(AMARILLO), "Partida en: ", 0
+   441 00000688 656E3A2000         
+   442 0000068D 8A47616C6F70652063-     txt_exito       db C(VERDE), "Galope completo: el caballo cruzo la pantalla", 0
+   442 00000696 6F6D706C65746F3A20-
+   442 0000069F 656C20636162616C6C-
+   442 000006A8 6F206372757A6F206C-
+   442 000006B1 612070616E74616C6C-
+   442 000006BA 6100               
+   443                                  
+   444 000006BC 874665636861202849-     txt_fecha       db C(GRIS), "Fecha (INT 1Ah AH=04h) ... ", C(BLANCO), 0
+   444 000006C5 4E5420314168204148-
+   444 000006CE 3D30346829202E2E2E-
+   444 000006D7 208F00             
+   445 000006DA 87486F726120202849-     txt_hora        db C(GRIS), "Hora  (INT 1Ah AH=02h) ... ", C(BLANCO), 0
+   445 000006E3 4E5420314168204148-
+   445 000006EC 3D30326829202E2E2E-
+   445 000006F5 208F00             
+   446 000006F8 8752656C6F6A206465-     txt_rtc_nota    db C(GRIS), "Reloj de tiempo real emulado por QEMU (UTC por defecto)", 0
+   446 00000701 207469656D706F2072-
+   446 0000070A 65616C20656D756C61-
+   446 00000713 646F20706F72205145-
+   446 0000071C 4D5520285554432070-
+   446 00000725 6F7220646566656374-
+   446 0000072E 6F2900             
+   447                                  
+   448 00000731 8950726573696F6E65-     txt_volver      db C(AZUL_CLARO), "Presione cualquier tecla para volver al menu...", 0
+   448 0000073A 206375616C71756965-
+   448 00000743 72207465636C612070-
+   448 0000074C 61726120766F6C7665-
+   448 00000755 7220616C206D656E75-
+   448 0000075E 2E2E2E00           
+   449 00000762 8A53697374656D6120-     txt_detenido    db C(VERDE), "Sistema detenido de forma controlada. Ya puede cerrar QEMU.", 0
+   449 0000076B 646574656E69646F20-
+   449 00000774 646520666F726D6120-
+   449 0000077D 636F6E74726F6C6164-
+   449 00000786 612E20596120707565-
+   449 0000078F 646520636572726172-
+   449 00000798 2051454D552E00     
+   450                                  
+   451 0000079F 0A00                    diez            dw 10
+   452 000007A1 00                      unidad          db 0
+   453 000007A2 00                      margen          db 0
+   454 000007A3 00                      col_galope      db 0
+   455 000007A4 0000                    tecla           dw 0
+   456 000007A6 0000                    pos_prompt      dw 0
+   457 000007A8 00000000                rtc_fecha       dd 0
+   458 000007AC 00000000                rtc_hora        dd 0
+   459                                  
+   460                                  ETAPA2_USADOS   equ $ - $$
+   461                                  
+   462                                  ; Relleno hasta el tamaño reservado; NASM falla si la etapa 2 lo excede.
+   463 000007B0 00<rep 1850h>           times ETAPA2_SECTORES * 512 - ($ - $$) db 0
